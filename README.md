@@ -1,6 +1,6 @@
 # zt
 
-Remote Zellij session manager for humans and automation.
+Remote Zellij session manager for humans and agents.
 
 `zt` is a tiny Rust wrapper around `ssh`, `mosh`, and `zellij` for remote machines where
 you keep long-running terminal work inside Zellij sessions.

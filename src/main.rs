@@ -191,7 +191,7 @@ impl Config {
 #[command(
     name = "zt",
     version = VERSION,
-    about = "Remote Zellij session manager for humans and automation.",
+    about = "Remote Zellij session manager for humans and agents.",
     after_help = AFTER_HELP
 )]
 struct Cli {
