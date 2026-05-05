@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
@@ -1138,12 +1138,23 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
 }
 
 fn random_suffix() -> String {
+    let mut bytes = [0_u8; 3];
+    if fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .is_ok()
+    {
+        return bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+    }
+
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let value = (nanos ^ ((std::process::id() as u128) << 32)) & 0xffff;
-    format!("{value:04x}")
+    let value = (nanos ^ std::process::id() as u128) & 0xffffff;
+    format!("{value:06x}")
 }
 
 fn resolve_session_name(session: &str, auto: bool, scope: &str, host: Option<&str>) -> String {
@@ -2039,5 +2050,12 @@ mod tests {
     fn auto_marker_resolves() {
         let session = resolve_session_name("auto", false, "remote", Some("tmm"));
         assert!(session.starts_with("tmm-"));
+    }
+
+    #[test]
+    fn random_suffix_is_short_hex() {
+        let suffix = random_suffix();
+        assert_eq!(suffix.len(), 6);
+        assert!(suffix.chars().all(|character| character.is_ascii_hexdigit()));
     }
 }

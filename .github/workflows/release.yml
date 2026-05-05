@@ -1,0 +1,32 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - run: cargo build --release --locked --target aarch64-apple-darwin
+      - run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          target="aarch64-apple-darwin"
+          asset="zt-${version}-${target}.tar.gz"
+          mkdir -p "dist/${asset%.tar.gz}"
+          cp "target/${target}/release/zt" "dist/${asset%.tar.gz}/zt"
+          cp README.md LICENSE "dist/${asset%.tar.gz}/"
+          tar -C dist -czf "${asset}" "${asset%.tar.gz}"
+          shasum -a 256 "${asset}"
+          gh release create "${version}" "${asset}" --title "${version}" --notes "zt ${version}" --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
