@@ -2056,6 +2056,10 @@ mod tests {
     fn random_suffix_is_short_hex() {
         let suffix = random_suffix();
         assert_eq!(suffix.len(), 6);
-        assert!(suffix.chars().all(|character| character.is_ascii_hexdigit()));
+        assert!(
+            suffix
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
     }
 }
