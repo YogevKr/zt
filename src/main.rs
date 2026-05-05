@@ -1138,7 +1138,7 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
 }
 
 fn random_suffix() -> String {
-    let mut bytes = [0_u8; 3];
+    let mut bytes = [0_u8; 2];
     if fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .is_ok()
@@ -1153,8 +1153,8 @@ fn random_suffix() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let value = (nanos ^ std::process::id() as u128) & 0xffffff;
-    format!("{value:06x}")
+    let value = (nanos ^ std::process::id() as u128) & 0xffff;
+    format!("{value:04x}")
 }
 
 fn resolve_session_name(session: &str, auto: bool, scope: &str, host: Option<&str>) -> String {
@@ -2055,7 +2055,7 @@ mod tests {
     #[test]
     fn random_suffix_is_short_hex() {
         let suffix = random_suffix();
-        assert_eq!(suffix.len(), 6);
+        assert_eq!(suffix.len(), 4);
         assert!(
             suffix
                 .chars()
