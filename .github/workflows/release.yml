@@ -10,10 +10,11 @@ permissions:
 
 jobs:
   macos-arm64:
-    runs-on: macos-15-arm64
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: test "$(uname -m)" = "arm64"
       - run: cargo build --release
       - run: target/release/zt --version
       - run: |
