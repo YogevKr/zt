@@ -2,7 +2,7 @@
 
 Remote Zellij session manager for humans and automation.
 
-`zt` is a tiny wrapper around `ssh`, `mosh`, and `zellij` for remote machines where
+`zt` is a tiny Rust wrapper around `ssh`, `mosh`, and `zellij` for remote machines where
 you keep long-running terminal work inside Zellij sessions.
 
 Defaults:
@@ -32,7 +32,7 @@ Or from source:
 
 ```bash
 git clone https://github.com/yogevkr/zt.git
-ln -sf "$PWD/zt/zt" ~/.local/bin/zt
+cargo install --path zt
 ```
 
 Usage:
@@ -167,11 +167,11 @@ zt ensure main --print-command
 
 Requirements:
 
-- Python 3
 - `ssh`
 - `zellij` on the remote host
 - `fzf` locally, optional
 - `mosh` locally and remotely, optional
+- Rust toolchain, only when building from source
 
 `zt install` can install `fzf`, remote `zellij`, optional `mosh`, optional
 remote `tmux`, and optional local `zellij`.
