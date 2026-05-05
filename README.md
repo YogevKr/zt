@@ -11,11 +11,24 @@ Defaults:
 - Transport: `ssh`
 - Picker: `fzf` when available, numbered prompt otherwise
 
+Defaults are configurable by config file, environment variables, or flags. The
+precedence is:
+
+```text
+built-ins < config file < environment < CLI flags
+```
+
 Running `zt` with no subcommand opens the interactive browser. Automation should
 always pass a subcommand such as `list`, `status`, `exists`, `ensure`,
 `attach --background`, `close`, or `delete`.
 
 Install:
+
+```bash
+brew install yogevkr/tap/zt
+```
+
+Or from source:
 
 ```bash
 git clone https://github.com/yogevkr/zt.git
@@ -27,6 +40,9 @@ Usage:
 ```bash
 zt                 # browse sessions on tmm
 zt --version
+zt config init     # write ~/.config/zt/config.toml
+zt config show     # print effective config
+zt config show --json
 zt list            # list sessions
 zt list --json     # machine-readable session list
 zt status --json   # machine-readable dependency check
@@ -42,15 +58,32 @@ zt delete work     # close and delete saved session state
 zt delete work --missing-ok --json
 zt --mosh main     # attach/create over mosh
 zt -H mac-mini     # browse another host
+zt --picker prompt # force numbered prompt
+```
+
+Config file:
+
+```toml
+# ~/.config/zt/config.toml
+host = "tmm"
+transport = "ssh" # ssh or mosh
+picker = "auto"   # auto, fzf, prompt, or none
+connect_timeout = 10
+remote_path = "/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+ssh_options = []
+no_input = false
 ```
 
 Environment:
 
 ```bash
+export ZT_CONFIG=~/.config/zt/config.toml
 export ZT_HOST=tmm
 export ZT_TRANSPORT=ssh # or mosh
+export ZT_PICKER=auto   # auto, fzf, prompt, numbered, none, or off
 export ZT_CONNECT_TIMEOUT=10
 export ZT_REMOTE_PATH='/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH'
+export ZT_SSH_OPTIONS='StrictHostKeyChecking=accept-new,ServerAliveInterval=30'
 ```
 
 Useful flags:
@@ -59,6 +92,8 @@ Useful flags:
 zt --no-input list --json
 zt --connect-timeout 3 status --json
 zt --ssh-option StrictHostKeyChecking=accept-new list
+zt --config ~/.config/zt/work.toml config show
+zt --picker none --no-input list --json
 zt attach main --print-command
 zt ensure main --print-command
 ```
