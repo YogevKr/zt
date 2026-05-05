@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""Browse, attach to, and manage remote Zellij sessions over SSH or mosh."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+
+
+DEFAULT_HOST = os.environ.get("ZT_HOST", "tmm")
+REMOTE_PATH = "/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+NEW_MARKER = "+ new session"
+COMMANDS = {
+    "list",
+    "ls",
+    "attach",
+    "a",
+    "new",
+    "n",
+    "kill",
+    "k",
+    "close",
+    "delete",
+    "d",
+    "rm",
+}
+
+
+@dataclass(frozen=True)
+class Config:
+    host: str
+    transport: str
+
+
+def remote_cmd(command: str) -> str:
+    return f"PATH={REMOTE_PATH}; {command}"
+
+
+def run_remote(config: Config, command: str, *, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", config.host, remote_cmd(command)],
+        check=check,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def list_sessions(config: Config) -> list[str]:
+    proc = run_remote(config, "zellij list-sessions --short --no-formatting")
+    output = "\n".join(part for part in [proc.stdout, proc.stderr] if part)
+    sessions: list[str] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or "No active zellij sessions found" in line:
+            continue
+        sessions.append(line)
+    return sessions
+
+
+def attach(config: Config, session: str) -> int:
+    command = remote_cmd(f"exec zellij attach --create {shlex.quote(session)}")
+    if config.transport == "mosh":
+        return subprocess.call(["mosh", config.host, "--", "zsh", "-lc", command])
+    return subprocess.call(["ssh", "-t", config.host, command])
+
+
+def kill_session(config: Config, session: str) -> int:
+    proc = run_remote(config, f"zellij kill-session {shlex.quote(session)}")
+    if proc.stdout:
+        print(proc.stdout, end="")
+    if proc.returncode != 0 and proc.stderr:
+        print(proc.stderr, end="", file=sys.stderr)
+    return proc.returncode
+
+
+def delete_session(config: Config, session: str, *, force: bool) -> int:
+    force_flag = " --force" if force else ""
+    proc = run_remote(config, f"zellij delete-session{force_flag} {shlex.quote(session)}")
+    if proc.stdout:
+        print(proc.stdout, end="")
+    if proc.returncode != 0 and proc.stderr:
+        print(proc.stderr, end="", file=sys.stderr)
+    return proc.returncode
+
+
+def choose_with_fzf(items: list[str]) -> str | None:
+    if not sys.stdin.isatty() or not sys.stdout.isatty() or not shutil.which("fzf"):
+        return None
+    proc = subprocess.run(
+        ["fzf", "--prompt", "zellij> ", "--height", "40%", "--reverse"],
+        input="\n".join(items) + "\n",
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def prompt_choice(sessions: list[str]) -> str:
+    if not sessions:
+        return prompt_new_name()
+
+    for index, session in enumerate(sessions, start=1):
+        print(f"{index:2d}. {session}")
+    print(f"{len(sessions) + 1:2d}. {NEW_MARKER}")
+
+    answer = input("session> ").strip()
+    if not answer:
+        return ""
+    if answer.isdigit():
+        choice = int(answer)
+        if 1 <= choice <= len(sessions):
+            return sessions[choice - 1]
+        if choice == len(sessions) + 1:
+            return prompt_new_name()
+    return answer
+
+
+def prompt_new_name() -> str:
+    name = input("new session name [main]> ").strip()
+    return name or "main"
+
+
+def browse(config: Config) -> int:
+    sessions = list_sessions(config)
+    choices = [NEW_MARKER, *sessions]
+    choice = choose_with_fzf(choices)
+    if choice is None:
+        choice = prompt_choice(sessions)
+    if not choice:
+        return 130
+    if choice == NEW_MARKER:
+        choice = prompt_new_name()
+    return attach(config, choice)
+
+
+def normalize_shortcut(argv: list[str]) -> list[str]:
+    skip_next = False
+    for index, arg in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--":
+            break
+        if arg in ("-H", "--host"):
+            skip_next = True
+            continue
+        if arg in ("--ssh", "--mosh", "-h", "--help"):
+            continue
+        if arg.startswith("-"):
+            continue
+        if arg not in COMMANDS:
+            return [*argv[:index], "attach", arg, *argv[index + 1 :]]
+        return argv
+    return argv
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    argv = normalize_shortcut(argv)
+    parser = argparse.ArgumentParser(
+        prog="zt",
+        description="Browse, create, and attach to Zellij sessions on a remote host.",
+        epilog="\n".join(
+            [
+                "examples:",
+                "  zt                 browse sessions on tmm",
+                "  zt list            list sessions on tmm",
+                "  zt main            attach/create session 'main'",
+                "  zt close main      close a running session",
+                "  zt delete main     close and delete saved session state",
+                "  zt --mosh main     attach/create over mosh",
+                "  zt -H mac-mini     browse another host",
+            ]
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("-H", "--host", default=DEFAULT_HOST, help=f"remote host (default: {DEFAULT_HOST})")
+    transport = parser.add_mutually_exclusive_group()
+    transport.add_argument("--ssh", action="store_const", const="ssh", dest="transport", help="attach over ssh")
+    transport.add_argument("--mosh", action="store_const", const="mosh", dest="transport", help="attach over mosh")
+    parser.set_defaults(transport=os.environ.get("ZT_TRANSPORT", "ssh"))
+
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("list", aliases=["ls"], help="list active sessions")
+
+    attach_parser = subparsers.add_parser("attach", aliases=["a"], help="attach/create a session")
+    attach_parser.add_argument("session")
+
+    new_parser = subparsers.add_parser("new", aliases=["n"], help="create/attach a session")
+    new_parser.add_argument("session", nargs="?", default="main")
+
+    kill_parser = subparsers.add_parser("kill", aliases=["k", "close"], help="close a running session")
+    kill_parser.add_argument("session")
+
+    delete_parser = subparsers.add_parser(
+        "delete",
+        aliases=["d", "rm"],
+        help="close and delete a session, including saved state",
+    )
+    delete_parser.add_argument("session")
+    delete_parser.add_argument("--no-force", action="store_true", help="only delete if the session is not running")
+
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    config = Config(host=args.host, transport=args.transport)
+
+    if args.command in ("list", "ls"):
+        for session in list_sessions(config):
+            print(session)
+        return 0
+
+    if args.command in ("attach", "a", "new", "n"):
+        return attach(config, args.session)
+
+    if args.command in ("kill", "k", "close"):
+        return kill_session(config, args.session)
+
+    if args.command in ("delete", "d", "rm"):
+        return delete_session(config, args.session, force=not args.no_force)
+
+    return browse(config)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
