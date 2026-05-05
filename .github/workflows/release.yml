@@ -10,20 +10,19 @@ permissions:
 
 jobs:
   macos-arm64:
-    runs-on: macos-latest
+    runs-on: macos-15-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-      - run: cargo build --release --target aarch64-apple-darwin
+      - run: cargo build --release
+      - run: target/release/zt --version
       - run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME}"
           target="aarch64-apple-darwin"
           asset="zt-${version}-${target}.tar.gz"
           mkdir -p "dist/${asset%.tar.gz}"
-          cp "target/${target}/release/zt" "dist/${asset%.tar.gz}/zt"
+          cp "target/release/zt" "dist/${asset%.tar.gz}/zt"
           cp README.md LICENSE "dist/${asset%.tar.gz}/"
           tar -C dist -czf "${asset}" "${asset%.tar.gz}"
           shasum -a 256 "${asset}"
