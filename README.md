@@ -43,6 +43,9 @@ zt --version
 zt config init     # write ~/.config/zt/config.toml
 zt config show     # print effective config
 zt config show --json
+zt install         # install missing local/remote dependencies
+zt install --dry-run
+zt install --yes --json
 zt list            # list sessions
 zt list --json     # machine-readable session list
 zt status --json   # machine-readable dependency check
@@ -60,6 +63,22 @@ zt --mosh main     # attach/create over mosh
 zt -H mac-mini     # browse another host
 zt --picker prompt # force numbered prompt
 ```
+
+Install flow:
+
+```bash
+zt install                         # local fzf + remote zellij when missing
+zt --mosh install                  # also installs mosh locally and remotely
+zt install --with-mosh --with-tmux # opt into mosh and remote tmux
+zt install --local-only
+zt install --remote-only
+zt install --dry-run --json
+zt install --yes --json
+```
+
+Supported package managers: Homebrew, apt, dnf, pacman, and apk. Remote installs
+run over SSH against the configured host. System package managers use `sudo`;
+Homebrew does not.
 
 Config file:
 
@@ -105,5 +124,8 @@ Requirements:
 - `zellij` on the remote host
 - `fzf` locally, optional
 - `mosh` locally and remotely, optional
+
+`zt install` can install `fzf`, remote `zellij`, optional `mosh`, optional
+remote `tmux`, and optional local `zellij`.
 
 License: MIT
