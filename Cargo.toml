@@ -1,13 +1,13 @@
 [package]
 name = "zt"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "Remote Zellij session manager for humans and automation"
 license = "MIT"
 repository = "https://github.com/YogevKr/zt"
 
 [dependencies]
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.1", default-features = false, features = ["derive", "error-context", "help", "std", "suggestions", "usage"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 toml = "1.1.2"
