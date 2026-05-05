@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import shutil
@@ -13,11 +14,23 @@ from dataclasses import dataclass
 
 
 DEFAULT_HOST = os.environ.get("ZT_HOST", "tmm")
-REMOTE_PATH = "/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+DEFAULT_TRANSPORT = os.environ.get("ZT_TRANSPORT", "ssh")
+DEFAULT_REMOTE_PATH = os.environ.get(
+    "ZT_REMOTE_PATH",
+    "/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH",
+)
+DEFAULT_CONNECT_TIMEOUT = int(os.environ.get("ZT_CONNECT_TIMEOUT", "10"))
+VERSION = "0.1.0"
 NEW_MARKER = "+ new session"
 COMMANDS = {
+    "browse",
+    "b",
     "list",
     "ls",
+    "status",
+    "doctor",
+    "exists",
+    "ensure",
     "attach",
     "a",
     "new",
@@ -31,29 +44,81 @@ COMMANDS = {
 }
 
 
+class ZtError(Exception):
+    def __init__(self, message: str, code: int = 1) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class Config:
     host: str
     transport: str
+    remote_path: str
+    connect_timeout: int
+    ssh_options: tuple[str, ...]
+    no_input: bool
 
 
-def remote_cmd(command: str) -> str:
-    return f"PATH={REMOTE_PATH}; {command}"
+def remote_cmd(config: Config, command: str) -> str:
+    return f"PATH={config.remote_path}; {command}"
 
 
-def run_remote(config: Config, command: str, *, check: bool = False) -> subprocess.CompletedProcess[str]:
+def ssh_args(config: Config, *, batch: bool, tty: bool = False) -> list[str]:
+    args = ["ssh"]
+    if tty:
+        args.append("-t")
+    if batch:
+        args.extend(["-o", "BatchMode=yes"])
+    if config.connect_timeout > 0:
+        args.extend(["-o", f"ConnectTimeout={config.connect_timeout}"])
+    for option in config.ssh_options:
+        args.extend(["-o", option])
+    args.append(config.host)
+    return args
+
+
+def run_remote(config: Config, command: str, *, batch: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", config.host, remote_cmd(command)],
-        check=check,
+        [*ssh_args(config, batch=batch), remote_cmd(config, command)],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
 
 
-def list_sessions(config: Config) -> list[str]:
-    proc = run_remote(config, "zellij list-sessions --short --no-formatting")
+def remote_error(proc: subprocess.CompletedProcess[str], action: str) -> ZtError:
+    detail = "\n".join(part.strip() for part in [proc.stderr, proc.stdout] if part.strip())
+    return ZtError(f"{action} failed on remote host: {detail or f'exit {proc.returncode}'}", proc.returncode or 1)
+
+
+def print_json(data: object) -> None:
+    print(json.dumps(data, sort_keys=True))
+
+
+def print_command(argv: list[str]) -> None:
+    print(shlex.join(argv))
+
+
+def filter_sessions(sessions: list[str], *, prefix: str | None, contains: str | None) -> list[str]:
+    if prefix is not None:
+        sessions = [session for session in sessions if session.startswith(prefix)]
+    if contains is not None:
+        sessions = [session for session in sessions if contains in session]
+    return sessions
+
+
+def list_sessions(config: Config, *, reverse: bool = False) -> list[str]:
+    command = "zellij list-sessions --short --no-formatting"
+    if reverse:
+        command += " --reverse"
+    proc = run_remote(config, command)
     output = "\n".join(part for part in [proc.stdout, proc.stderr] if part)
+    if "No active zellij sessions found" in output:
+        return []
+    if proc.returncode != 0:
+        raise remote_error(proc, "list sessions")
+
     sessions: list[str] = []
     for raw_line in output.splitlines():
         line = raw_line.strip()
@@ -63,29 +128,133 @@ def list_sessions(config: Config) -> list[str]:
     return sessions
 
 
-def attach(config: Config, session: str) -> int:
-    command = remote_cmd(f"exec zellij attach --create {shlex.quote(session)}")
-    if config.transport == "mosh":
-        return subprocess.call(["mosh", config.host, "--", "zsh", "-lc", command])
-    return subprocess.call(["ssh", "-t", config.host, command])
+def is_missing_session_output(output: str) -> bool:
+    return "No session named" in output or "not found" in output
 
 
-def kill_session(config: Config, session: str) -> int:
-    proc = run_remote(config, f"zellij kill-session {shlex.quote(session)}")
-    if proc.stdout:
+def session_exists(config: Config, session: str) -> bool:
+    return session in list_sessions(config)
+
+
+def ensure_session(
+    config: Config,
+    session: str,
+    *,
+    json_output: bool = False,
+    print_only: bool = False,
+) -> int:
+    command = remote_cmd(config, f"zellij attach --create-background {shlex.quote(session)}")
+    argv = [*ssh_args(config, batch=True), command]
+    if print_only:
+        print_command(argv)
+        return 0
+
+    proc = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    data = {
+        "host": config.host,
+        "session": session,
+        "ensured": proc.returncode == 0,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
+    if json_output:
+        print_json(data)
+    elif proc.stdout:
         print(proc.stdout, end="")
-    if proc.returncode != 0 and proc.stderr:
-        print(proc.stderr, end="", file=sys.stderr)
+    if proc.returncode != 0:
+        if not json_output and proc.stderr:
+            print(proc.stderr, end="", file=sys.stderr)
+        return proc.returncode
+    if not json_output and not proc.stdout:
+        print(session)
+    return 0
+
+
+def attach(
+    config: Config,
+    session: str,
+    *,
+    create: bool,
+    background: bool,
+    json_output: bool,
+    print_only: bool,
+) -> int:
+    if background:
+        return ensure_session(config, session, json_output=json_output, print_only=print_only)
+
+    flags = " --create" if create else ""
+    command = remote_cmd(config, f"exec zellij attach{flags} {shlex.quote(session)}")
+    if config.transport == "mosh":
+        argv = ["mosh", config.host, "--", "sh", "-lc", command]
+    else:
+        argv = [*ssh_args(config, batch=False, tty=True), command]
+
+    if print_only:
+        print_command(argv)
+        return 0
+    if json_output:
+        print_json({"host": config.host, "session": session, "attached": False, "command": shlex.join(argv)})
+        return 0
+    return subprocess.call(argv)
+
+
+def kill_session(config: Config, session: str, *, missing_ok: bool, json_output: bool) -> int:
+    if missing_ok and not session_exists(config, session):
+        data = {"host": config.host, "session": session, "closed": False, "missing": True}
+        if json_output:
+            print_json(data)
+        return 0
+
+    proc = run_remote(config, f"zellij kill-session {shlex.quote(session)}")
+    missing = proc.returncode != 0 and is_missing_session_output(f"{proc.stdout}\n{proc.stderr}")
+    if missing_ok and missing:
+        if json_output:
+            print_json({"host": config.host, "session": session, "closed": False, "missing": True})
+        return 0
+
+    data = {
+        "host": config.host,
+        "session": session,
+        "closed": proc.returncode == 0,
+        "missing": missing,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
+    if json_output:
+        print_json(data)
+    else:
+        if proc.stdout:
+            print(proc.stdout, end="")
+        if proc.returncode != 0 and proc.stderr:
+            print(proc.stderr, end="", file=sys.stderr)
     return proc.returncode
 
 
-def delete_session(config: Config, session: str, *, force: bool) -> int:
+def delete_session(config: Config, session: str, *, force: bool, missing_ok: bool, json_output: bool) -> int:
     force_flag = " --force" if force else ""
     proc = run_remote(config, f"zellij delete-session{force_flag} {shlex.quote(session)}")
-    if proc.stdout:
-        print(proc.stdout, end="")
-    if proc.returncode != 0 and proc.stderr:
-        print(proc.stderr, end="", file=sys.stderr)
+    missing = proc.returncode != 0 and is_missing_session_output(f"{proc.stdout}\n{proc.stderr}")
+    if missing_ok and missing:
+        if json_output:
+            print_json({"host": config.host, "session": session, "deleted": False, "missing": True})
+        return 0
+
+    data = {
+        "host": config.host,
+        "session": session,
+        "deleted": proc.returncode == 0,
+        "missing": missing,
+        "force": force,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
+    if json_output:
+        print_json(data)
+    else:
+        if proc.stdout:
+            print(proc.stdout, end="")
+        if proc.returncode != 0 and proc.stderr:
+            print(proc.stderr, end="", file=sys.stderr)
     return proc.returncode
 
 
@@ -129,6 +298,9 @@ def prompt_new_name() -> str:
 
 
 def browse(config: Config) -> int:
+    if config.no_input or not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise ZtError("browse requires an interactive terminal; use 'zt list', 'zt ensure SESSION', or 'zt attach SESSION'", 2)
+
     sessions = list_sessions(config)
     choices = [NEW_MARKER, *sessions]
     choice = choose_with_fzf(choices)
@@ -138,10 +310,116 @@ def browse(config: Config) -> int:
         return 130
     if choice == NEW_MARKER:
         choice = prompt_new_name()
-    return attach(config, choice)
+    return attach(config, choice, create=True, background=False, json_output=False, print_only=False)
+
+
+def local_tool_status(tool: str) -> dict[str, object]:
+    path = shutil.which(tool)
+    if not path:
+        return {"present": False, "path": None, "version": None}
+
+    version_args = {
+        "ssh": [tool, "-V"],
+        "tmux": [tool, "-V"],
+    }.get(tool, [tool, "--version"])
+    proc = subprocess.run(version_args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    version = (proc.stdout or proc.stderr).splitlines()
+    return {"present": True, "path": path, "version": version[0] if version else None}
+
+
+def remote_tool_status(config: Config) -> tuple[dict[str, object], str | None]:
+    script = r'''
+printf 'hostname\t%s\n' "$(hostname 2>/dev/null || uname -n)"
+for tool in zellij tmux mosh; do
+  tool_path=$(command -v "$tool" 2>/dev/null || true)
+  if [ -z "$tool_path" ]; then
+    printf 'tool\t%s\t\t\n' "$tool"
+    continue
+  fi
+  case "$tool" in
+    tmux) version=$("$tool" -V 2>&1 | sed -n '1p') ;;
+    *) version=$("$tool" --version 2>&1 | sed -n '1p') ;;
+  esac
+  printf 'tool\t%s\t%s\t%s\n' "$tool" "$tool_path" "$version"
+done
+'''
+    proc = run_remote(config, script)
+    remote: dict[str, object] = {"hostname": None, "tools": {}}
+    if proc.returncode != 0:
+        return remote, "\n".join(part.strip() for part in [proc.stderr, proc.stdout] if part.strip())
+
+    tools: dict[str, object] = {}
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if not parts:
+            continue
+        if parts[0] == "hostname" and len(parts) >= 2:
+            remote["hostname"] = parts[1]
+        elif parts[0] == "tool" and len(parts) >= 4:
+            tools[parts[1]] = {
+                "present": bool(parts[2]),
+                "path": parts[2] or None,
+                "version": parts[3] or None,
+            }
+    remote["tools"] = tools
+    return remote, None
+
+
+def status(config: Config, *, json_output: bool) -> int:
+    local = {tool: local_tool_status(tool) for tool in ["ssh", "mosh", "zellij", "fzf"]}
+    remote, remote_error_message = remote_tool_status(config)
+    remote_tools = remote.get("tools", {})
+    remote_zellij = isinstance(remote_tools, dict) and remote_tools.get("zellij", {})
+    remote_mosh = isinstance(remote_tools, dict) and remote_tools.get("mosh", {})
+
+    ok = (
+        local["ssh"]["present"]
+        and isinstance(remote_zellij, dict)
+        and bool(remote_zellij.get("present"))
+        and (
+            config.transport != "mosh"
+            or (
+                local["mosh"]["present"]
+                and isinstance(remote_mosh, dict)
+                and bool(remote_mosh.get("present"))
+            )
+        )
+        and remote_error_message is None
+    )
+    data = {
+        "ok": bool(ok),
+        "host": config.host,
+        "transport": config.transport,
+        "connect_timeout": config.connect_timeout,
+        "local": local,
+        "remote": remote,
+        "remote_error": remote_error_message,
+    }
+
+    if json_output:
+        print_json(data)
+    else:
+        print(f"host: {config.host}")
+        print(f"transport: {config.transport}")
+        if remote.get("hostname"):
+            print(f"remote hostname: {remote['hostname']}")
+        if remote_error_message:
+            print(f"remote error: {remote_error_message}", file=sys.stderr)
+        print("local:")
+        for tool, info in local.items():
+            suffix = f"{info['path']} ({info['version']})" if info["present"] else "missing"
+            print(f"  {tool}: {suffix}")
+        print("remote:")
+        if isinstance(remote_tools, dict):
+            for tool, info in remote_tools.items():
+                if isinstance(info, dict):
+                    suffix = f"{info['path']} ({info['version']})" if info["present"] else "missing"
+                    print(f"  {tool}: {suffix}")
+    return 0 if ok else 1
 
 
 def normalize_shortcut(argv: list[str]) -> list[str]:
+    options_with_values = {"-H", "--host", "--remote-path", "--connect-timeout", "--ssh-option"}
     skip_next = False
     for index, arg in enumerate(argv):
         if skip_next:
@@ -149,10 +427,10 @@ def normalize_shortcut(argv: list[str]) -> list[str]:
             continue
         if arg == "--":
             break
-        if arg in ("-H", "--host"):
+        if arg in options_with_values:
             skip_next = True
             continue
-        if arg in ("--ssh", "--mosh", "-h", "--help"):
+        if arg in ("--ssh", "--mosh", "--no-input", "-h", "--help"):
             continue
         if arg.startswith("-"):
             continue
@@ -162,74 +440,199 @@ def normalize_shortcut(argv: list[str]) -> list[str]:
     return argv
 
 
+def add_json_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-j", "--json", action="store_true", help="print machine-readable JSON")
+
+
+def add_session_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("session", help="Zellij session name")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     argv = normalize_shortcut(argv)
     parser = argparse.ArgumentParser(
         prog="zt",
-        description="Browse, create, and attach to Zellij sessions on a remote host.",
+        description="Remote Zellij session manager for humans and automation.",
         epilog="\n".join(
             [
-                "examples:",
-                "  zt                 browse sessions on tmm",
-                "  zt list            list sessions on tmm",
-                "  zt main            attach/create session 'main'",
-                "  zt close main      close a running session",
-                "  zt delete main     close and delete saved session state",
-                "  zt --mosh main     attach/create over mosh",
-                "  zt -H mac-mini     browse another host",
+                "human examples:",
+                "  zt                         browse sessions on tmm",
+                "  zt main                    attach/create session 'main'",
+                "  zt --mosh main             attach/create over mosh",
+                "",
+                "agent/noninteractive examples:",
+                "  zt list --json             list active sessions as JSON",
+                "  zt status --json           check local/remote dependencies",
+                "  zt exists main --json      return 0 if active, 1 if missing",
+                "  zt ensure main --json      create detached session if missing",
+                "  zt attach main --background --json",
+                "  zt close main --missing-ok --json",
+                "  zt delete main --missing-ok --json",
+                "",
+                "environment:",
+                "  ZT_HOST=tmm ZT_TRANSPORT=ssh ZT_CONNECT_TIMEOUT=10",
             ]
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("-H", "--host", default=DEFAULT_HOST, help=f"remote host (default: {DEFAULT_HOST})")
+    parser.add_argument("-H", "--host", default=DEFAULT_HOST, help=f"remote SSH host (default: {DEFAULT_HOST})")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument(
+        "--remote-path",
+        default=DEFAULT_REMOTE_PATH,
+        help="remote PATH used before invoking zellij/mosh/tmux",
+    )
+    parser.add_argument(
+        "--connect-timeout",
+        type=int,
+        default=DEFAULT_CONNECT_TIMEOUT,
+        help=f"SSH connect timeout in seconds, 0 disables the option (default: {DEFAULT_CONNECT_TIMEOUT})",
+    )
+    parser.add_argument(
+        "--ssh-option",
+        action="append",
+        default=[],
+        help="extra ssh -o option, repeatable, e.g. --ssh-option UserKnownHostsFile=/tmp/known_hosts",
+    )
+    parser.add_argument("--no-input", action="store_true", help="fail instead of opening fzf or prompts")
     transport = parser.add_mutually_exclusive_group()
     transport.add_argument("--ssh", action="store_const", const="ssh", dest="transport", help="attach over ssh")
     transport.add_argument("--mosh", action="store_const", const="mosh", dest="transport", help="attach over mosh")
-    parser.set_defaults(transport=os.environ.get("ZT_TRANSPORT", "ssh"))
+    parser.set_defaults(transport=DEFAULT_TRANSPORT)
 
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("list", aliases=["ls"], help="list active sessions")
 
-    attach_parser = subparsers.add_parser("attach", aliases=["a"], help="attach/create a session")
-    attach_parser.add_argument("session")
+    subparsers.add_parser("browse", aliases=["b"], help="interactively pick or create a session")
+
+    list_parser = subparsers.add_parser("list", aliases=["ls"], help="list active sessions")
+    add_json_argument(list_parser)
+    list_parser.add_argument("--count", action="store_true", help="print only the number of matching sessions")
+    list_parser.add_argument("--prefix", help="only include sessions starting with this prefix")
+    list_parser.add_argument("--contains", help="only include sessions containing this text")
+    list_parser.add_argument("--reverse", action="store_true", help="ask zellij for reverse creation order")
+
+    status_parser = subparsers.add_parser("status", aliases=["doctor"], help="check local and remote dependencies")
+    add_json_argument(status_parser)
+
+    exists_parser = subparsers.add_parser("exists", help="test whether an active session exists")
+    add_session_argument(exists_parser)
+    add_json_argument(exists_parser)
+
+    ensure_parser = subparsers.add_parser("ensure", help="create a detached session if it is missing")
+    add_session_argument(ensure_parser)
+    add_json_argument(ensure_parser)
+    ensure_parser.add_argument("--print-command", action="store_true", help="print the ssh command instead of running it")
+
+    attach_parser = subparsers.add_parser("attach", aliases=["a"], help="attach to a session, creating it by default")
+    add_session_argument(attach_parser)
+    add_json_argument(attach_parser)
+    attach_parser.add_argument("-b", "--background", action="store_true", help="create detached session and do not attach")
+    attach_parser.add_argument("--no-create", action="store_true", help="fail if the session does not already exist")
+    attach_parser.add_argument("--print-command", action="store_true", help="print the command instead of running it")
 
     new_parser = subparsers.add_parser("new", aliases=["n"], help="create/attach a session")
-    new_parser.add_argument("session", nargs="?", default="main")
+    new_parser.add_argument("session", nargs="?", default="main", help="Zellij session name (default: main)")
+    add_json_argument(new_parser)
+    new_parser.add_argument("-b", "--background", action="store_true", help="create detached session and do not attach")
+    new_parser.add_argument("--print-command", action="store_true", help="print the command instead of running it")
 
     kill_parser = subparsers.add_parser("kill", aliases=["k", "close"], help="close a running session")
-    kill_parser.add_argument("session")
+    add_session_argument(kill_parser)
+    add_json_argument(kill_parser)
+    kill_parser.add_argument("--missing-ok", action="store_true", help="exit 0 if the session is already missing")
 
     delete_parser = subparsers.add_parser(
         "delete",
         aliases=["d", "rm"],
         help="close and delete a session, including saved state",
     )
-    delete_parser.add_argument("session")
+    add_session_argument(delete_parser)
+    add_json_argument(delete_parser)
     delete_parser.add_argument("--no-force", action="store_true", help="only delete if the session is not running")
+    delete_parser.add_argument("--missing-ok", action="store_true", help="exit 0 if the session is already missing")
 
     return parser.parse_args(argv)
 
 
+def build_config(args: argparse.Namespace) -> Config:
+    return Config(
+        host=args.host,
+        transport=args.transport,
+        remote_path=args.remote_path,
+        connect_timeout=args.connect_timeout,
+        ssh_options=tuple(args.ssh_option),
+        no_input=args.no_input,
+    )
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    config = Config(host=args.host, transport=args.transport)
+    config = build_config(args)
+
+    if args.command in ("browse", "b"):
+        return browse(config)
 
     if args.command in ("list", "ls"):
-        for session in list_sessions(config):
-            print(session)
+        sessions = filter_sessions(
+            list_sessions(config, reverse=args.reverse),
+            prefix=args.prefix,
+            contains=args.contains,
+        )
+        if args.json:
+            print_json({"host": config.host, "sessions": sessions, "count": len(sessions)})
+        elif args.count:
+            print(len(sessions))
+        else:
+            for session in sessions:
+                print(session)
         return 0
 
-    if args.command in ("attach", "a", "new", "n"):
-        return attach(config, args.session)
+    if args.command in ("status", "doctor"):
+        return status(config, json_output=args.json)
+
+    if args.command == "exists":
+        exists = session_exists(config, args.session)
+        if args.json:
+            print_json({"host": config.host, "session": args.session, "exists": exists})
+        return 0 if exists else 1
+
+    if args.command == "ensure":
+        return ensure_session(config, args.session, json_output=args.json, print_only=args.print_command)
+
+    if args.command in ("attach", "a"):
+        return attach(
+            config,
+            args.session,
+            create=not args.no_create,
+            background=args.background,
+            json_output=args.json,
+            print_only=args.print_command,
+        )
+
+    if args.command in ("new", "n"):
+        return attach(
+            config,
+            args.session,
+            create=True,
+            background=args.background,
+            json_output=args.json,
+            print_only=args.print_command,
+        )
 
     if args.command in ("kill", "k", "close"):
-        return kill_session(config, args.session)
+        return kill_session(config, args.session, missing_ok=args.missing_ok, json_output=args.json)
 
     if args.command in ("delete", "d", "rm"):
-        return delete_session(config, args.session, force=not args.no_force)
+        return delete_session(config, args.session, force=not args.no_force, missing_ok=args.missing_ok, json_output=args.json)
 
+    if config.no_input or not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise ZtError("no command provided; use 'zt --help' for noninteractive commands", 2)
     return browse(config)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except ZtError as exc:
+        print(f"zt: {exc}", file=sys.stderr)
+        raise SystemExit(exc.code)
