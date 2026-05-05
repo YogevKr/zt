@@ -38,7 +38,12 @@ ln -sf "$PWD/zt/zt" ~/.local/bin/zt
 Usage:
 
 ```bash
-zt                 # browse sessions on tmm
+zt local           # attach/create local session main
+zt remote          # attach/create remote session main on tmm
+zt local work      # attach/create local session work
+zt remote work     # attach/create remote session work on tmm
+zt remote --mosh   # attach/create remote main over mosh
+zt                 # browse remote sessions on tmm
 zt --version
 zt config init     # write ~/.config/zt/config.toml
 zt config show     # print effective config
@@ -51,7 +56,7 @@ zt list --json     # machine-readable session list
 zt status --json   # machine-readable dependency check
 zt exists main     # exit 0 if active, 1 if missing
 zt ensure main     # create detached session if missing
-zt main            # attach/create session main
+zt main            # remote shorthand: attach/create session main
 zt new work        # attach/create session work
 zt attach main --background --json
 zt close work      # close a running session
@@ -62,6 +67,22 @@ zt delete work --missing-ok --json
 zt --mosh main     # attach/create over mosh
 zt -H mac-mini     # browse another host
 zt --picker prompt # force numbered prompt
+```
+
+Simple flows:
+
+```bash
+# Start on MacBook, attach from MacBook
+zt local
+zt local work
+
+# Start on tmm, attach from MacBook
+zt remote
+zt remote work
+
+# Same remote flow, using your configured default host
+zt main
+zt work
 ```
 
 Install flow:

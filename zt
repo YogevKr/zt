@@ -44,7 +44,7 @@ PICKER_ALIASES = {
     "none": "none",
     "off": "none",
 }
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 NEW_MARKER = "+ new session"
 PACKAGE_MANAGERS = ("brew", "apt-get", "dnf", "pacman", "apk")
 COMMANDS = {
@@ -54,6 +54,12 @@ COMMANDS = {
     "install",
     "setup",
     "bootstrap",
+    "local",
+    "here",
+    "l",
+    "remote",
+    "there",
+    "r",
     "list",
     "ls",
     "status",
@@ -251,7 +257,10 @@ def effective_config_values(args: argparse.Namespace) -> tuple[dict[str, object]
         value = getattr(args, key)
         if value is not None:
             cli_values[key] = value
-    if args.transport is not None:
+    remote_transport = getattr(args, "remote_transport", None)
+    if remote_transport is not None:
+        cli_values["transport"] = remote_transport
+    elif args.transport is not None:
         cli_values["transport"] = args.transport
     if args.ssh_option:
         cli_values["ssh_options"] = args.ssh_option
@@ -392,6 +401,35 @@ def attach(
         return 0
     if json_output:
         print_json({"host": config.host, "session": session, "attached": False, "command": shlex.join(argv)})
+        return 0
+    return subprocess.call(argv)
+
+
+def attach_local(
+    session: str,
+    *,
+    create: bool,
+    background: bool,
+    json_output: bool,
+    print_only: bool,
+) -> int:
+    zellij = shutil.which("zellij")
+    if zellij is None:
+        raise ZtError("local zellij not found; run 'zt install --with-local-zellij'", 127)
+
+    if background:
+        argv = [zellij, "attach", "--create-background", session]
+    else:
+        argv = [zellij, "attach"]
+        if create:
+            argv.append("--create")
+        argv.append(session)
+
+    if print_only:
+        print_command(argv)
+        return 0
+    if json_output:
+        print_json({"scope": "local", "session": session, "attached": False, "command": shlex.join(argv)})
         return 0
     return subprocess.call(argv)
 
@@ -871,9 +909,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         epilog="\n".join(
             [
                 "human examples:",
-                "  zt                         browse sessions on tmm",
-                "  zt main                    attach/create session 'main'",
-                "  zt --mosh main             attach/create over mosh",
+                "  zt local                   attach/create local session 'main'",
+                "  zt remote                  attach/create remote session 'main'",
+                "  zt local work              attach/create local session 'work'",
+                "  zt remote work             attach/create remote session 'work'",
+                "  zt                         browse remote sessions on tmm",
+                "  zt main                    remote shorthand for session 'main'",
+                "  zt --mosh remote main      attach/create remote session over mosh",
                 "  zt --picker prompt         browse with numbered prompt",
                 "  zt config init             write ~/.config/zt/config.toml",
                 "  zt install                 install missing local/remote dependencies",
@@ -948,6 +990,32 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     install_parser.add_argument("--with-tmux", action="store_true", help="install tmux on the remote host")
     install_parser.add_argument("--with-local-zellij", action="store_true", help="install zellij locally too")
     install_parser.add_argument("--no-fzf", action="store_true", help="do not install local fzf")
+
+    local_parser = subparsers.add_parser(
+        "local",
+        aliases=["here", "l"],
+        help="attach/create a local Zellij session",
+    )
+    local_parser.add_argument("session", nargs="?", default="main", help="Zellij session name (default: main)")
+    add_json_argument(local_parser)
+    local_parser.add_argument("-b", "--background", action="store_true", help="create detached session and do not attach")
+    local_parser.add_argument("--no-create", action="store_true", help="fail if the session does not already exist")
+    local_parser.add_argument("--print-command", action="store_true", help="print the command instead of running it")
+
+    remote_parser = subparsers.add_parser(
+        "remote",
+        aliases=["there", "r"],
+        help="attach/create a session on the configured remote host",
+    )
+    remote_parser.add_argument("session", nargs="?", default="main", help="Zellij session name (default: main)")
+    remote_parser.add_argument("-H", "--host", help="remote SSH host")
+    remote_transport = remote_parser.add_mutually_exclusive_group()
+    remote_transport.add_argument("--ssh", action="store_const", const="ssh", dest="remote_transport", help="attach over ssh")
+    remote_transport.add_argument("--mosh", action="store_const", const="mosh", dest="remote_transport", help="attach over mosh")
+    add_json_argument(remote_parser)
+    remote_parser.add_argument("-b", "--background", action="store_true", help="create detached session and do not attach")
+    remote_parser.add_argument("--no-create", action="store_true", help="fail if the session does not already exist")
+    remote_parser.add_argument("--print-command", action="store_true", help="print the command instead of running it")
 
     list_parser = subparsers.add_parser("list", aliases=["ls"], help="list active sessions")
     add_json_argument(list_parser)
@@ -1045,6 +1113,25 @@ def main(argv: list[str]) -> int:
 
     if args.command in ("install", "setup", "bootstrap"):
         return install_dependencies(config, args)
+
+    if args.command in ("local", "here", "l"):
+        return attach_local(
+            args.session,
+            create=not args.no_create,
+            background=args.background,
+            json_output=args.json,
+            print_only=args.print_command,
+        )
+
+    if args.command in ("remote", "there", "r"):
+        return attach(
+            config,
+            args.session,
+            create=not args.no_create,
+            background=args.background,
+            json_output=args.json,
+            print_only=args.print_command,
+        )
 
     if args.command in ("list", "ls"):
         sessions = filter_sessions(
